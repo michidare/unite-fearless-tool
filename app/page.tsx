@@ -14,10 +14,12 @@ type SeriesConfig = {
   banCount: BanCount;
   fearlessScope: FearlessScope; // series: シリーズ累計 / game: ゲーム内のみ
   ngIncludesBans: boolean; // true: BANも使用NGに含める（デフォルト）
+  globalBanEnabled: boolean;
 };
 
 type Side = "A" | "B";
-type Slot = "ban" | "pick";
+type DraftSide = Side | "GLOBAL";
+type Slot = "ban" | "pick" | "globalBan";
 
 type Game = {
   gameNo: number;
@@ -31,7 +33,7 @@ type Game = {
 
 type SelectedSlot = {
   gameNo: number;
-  side: Side;
+  side: DraftSide;
   slot: Slot;
   index: number;
 } | null;
@@ -39,6 +41,7 @@ type SelectedSlot = {
 type PersistedState = {
   config?: SeriesConfig;
   games?: Game[];
+  globalBans?: string[];
   currentGameNo?: number;
   teamAName?: string;
   teamBName?: string;
@@ -128,12 +131,19 @@ const SPECTATOR_PANEL: CSSProperties = {
   boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
 };
 
+function normalizeGlobalBans(globalBans: string[] | undefined, banCount: BanCount) {
+  const base = Array.isArray(globalBans) ? globalBans.slice(0, banCount) : [];
+  while (base.length < banCount) base.push("");
+  return base.map((x) => (x ? normalizeName(x) : ""));
+}
+
 function resolvePersistedState(source: PersistedState) {
   const config: SeriesConfig = {
     format: source.config?.format ?? "BO5",
     banCount: source.config?.banCount ?? 3,
     fearlessScope: source.config?.fearlessScope ?? "series",
     ngIncludesBans: source.config?.ngIncludesBans ?? true,
+    globalBanEnabled: source.config?.globalBanEnabled ?? false,
   };
 
   const games = normalizeGamesForConfig(
@@ -152,6 +162,7 @@ function resolvePersistedState(source: PersistedState) {
   return {
     config,
     games,
+    globalBans: config.globalBanEnabled ? normalizeGlobalBans(source.globalBans, config.banCount) : makeFixed(config.banCount),
     currentGameNo,
     teamAName: typeof source.teamAName === "string" && source.teamAName.trim() ? source.teamAName : "Team A",
     teamBName: typeof source.teamBName === "string" && source.teamBName.trim() ? source.teamBName : "Team B",
@@ -342,9 +353,11 @@ export default function Home() {
     banCount: 3,
     fearlessScope: "series",
     ngIncludesBans: true,
+    globalBanEnabled: false,
   });
 
   const [games, setGames] = useState<Game[]>(() => createGames("BO5", 3));
+  const [globalBans, setGlobalBans] = useState<string[]>(() => makeFixed(3));
   const [mounted, setMounted] = useState(false);
 
   const [isReadOnly, setIsReadOnly] = useState(false);
@@ -352,6 +365,7 @@ const [spectateId, setSpectateId] = useState<string>(""); // ✅ 観戦セッシ
 const [spectatorUrl, setSpectatorUrl] = useState<string>(""); // ✅ 観戦URL（表示/コピー用）
   const [spectateError, setSpectateError] = useState("");
   const currentSessionWriteKey = spectateId ? sessionWriteKeys[spectateId] ?? "" : "";
+  const globalBanLocked = config.globalBanEnabled && (anyLocked || currentGameNo > 1);
 
   // 枠選択（P0の中核）
   const [selected, setSelected] = useState<SelectedSlot>(null);
@@ -397,11 +411,16 @@ const [teamBName, setTeamBName] = useState<string>("Team B");
 const [lockHistory, setLockHistory] = useState<number[]>([]);
 
 
-  function slotKey(gameNo: number, side: Side, slot: Slot, index: number) {
+  function slotKey(gameNo: number, side: DraftSide, slot: Slot, index: number) {
     return `${gameNo}-${side}-${slot}-${index}`;
   }
 
   // “このGameで現在使われている”集合（設定に応じてBAN含む/含まない）
+  function getGlobalBanNames() {
+    if (!config.globalBanEnabled) return [];
+    return globalBans.filter(Boolean);
+  }
+
   function collectUsedFromGame(g: Game): string[] {
     const picks = [...g.picksA, ...g.picksB].filter(Boolean);
     if (!config.ngIncludesBans) return picks;
@@ -420,6 +439,8 @@ function collectUsedForDupCheck(g: Game): string[] {
   function getPastNgSetForGame(gameNo: number): Set<string> {
     const set = new Set<string>();
 
+    getGlobalBanNames().forEach((name) => set.add(name));
+
     if (config.fearlessScope === "game") {
       // game内のみ：過去NGは使わない（=空）
       return set;
@@ -435,9 +456,10 @@ function collectUsedForDupCheck(g: Game): string[] {
 
   function getCurrentGameUsedSet(gameNo: number): Set<string> {
   const g = games.find((x) => x.gameNo === gameNo);
-  if (!g) return new Set<string>();
-  // ✅ 同一Game内の重複禁止は常にBAN+PICKで判定
-  return new Set<string>(collectUsedForDupCheck(g));
+  const used = new Set<string>(getGlobalBanNames());
+  if (!g) return used;
+  collectUsedForDupCheck(g).forEach((name) => used.add(name));
+  return used;
 }
 
     // 右/各パネル表示用：「このGameの使用NG」
@@ -469,6 +491,15 @@ function collectUsedForDupCheck(g: Game): string[] {
     // ロック済みGameは編集不可
     const targetGame = games.find((g) => g.gameNo === selected.gameNo);
     if (targetGame?.locked) return "ロック済みのGameは編集できません";
+
+    if (selected.slot === "globalBan") {
+      if (globalBanLocked) return "Game 1開始後はグローバルBANを変更できません";
+      const currentValue = globalBans[selected.index] ?? "";
+      const globalUsed = new Set(getGlobalBanNames());
+      if (currentValue) globalUsed.delete(currentValue);
+      if (globalUsed.has(name)) return "グローバルBANで既に選択済みです";
+      return null;
+    }
 
     // 選択枠の現在値（置換時は旧値を除外して重複判定）
     const g = games.find((x) => x.gameNo === selected.gameNo);
@@ -504,13 +535,15 @@ function collectUsedForDupCheck(g: Game): string[] {
   // シリーズ累計の使用NG（タグ表示用）
   const usedNgSeries = useMemo(() => {
     const used = new Set<string>();
+    const activeGlobalBans = config.globalBanEnabled ? globalBans.filter(Boolean) : [];
+    activeGlobalBans.forEach((name) => used.add(name));
     for (const g of games) {
       const picks = [...g.picksA, ...g.picksB].filter(Boolean);
       const source = config.ngIncludesBans ? [...g.bansA, ...g.bansB, ...picks] : picks;
       source.filter(Boolean).forEach((name) => used.add(name));
     }
     return Array.from(used).sort();
-  }, [games, config.ngIncludesBans]);
+  }, [games, globalBans, config.ngIncludesBans, config.globalBanEnabled]);
 
 const filteredList = useMemo<Pokemon[]>(() => {
   const q = normalizeName(search);
@@ -539,7 +572,7 @@ const groupedByRole = useMemo(() => {
   const anyLocked = useMemo(() => games.some((g) => g.locked), [games]);
 
   const selectedGameLocked = useMemo(() => {
-  if (!selected) return false;
+  if (!selected || selected.slot === "globalBan") return false;
   return !!games.find((g) => g.gameNo === selected.gameNo)?.locked;
 }, [selected, games]);
 
@@ -556,6 +589,36 @@ const groupedByRole = useMemo(() => {
     if (!name) return;
 
     const k = slotKey(s.gameNo, s.side, s.slot, s.index);
+
+    if (s.slot === "globalBan") {
+      if (globalBanLocked) return;
+      const currentValue = globalBans[s.index] ?? "";
+      if (currentValue === name) {
+        setErrors((prev) => {
+          if (!prev[k]) return prev;
+          const copy = { ...prev };
+          delete copy[k];
+          return copy;
+        });
+        return;
+      }
+
+      const globalUsed = new Set(getGlobalBanNames());
+      if (currentValue) globalUsed.delete(currentValue);
+      if (globalUsed.has(name)) {
+        setErrors((prev) => ({ ...prev, [k]: "グローバルBANで既に選択済みです" }));
+        return;
+      }
+
+      setGlobalBans((prev) => prev.map((v, i) => (i === s.index ? name : v)));
+      setErrors((prev) => {
+        if (!prev[k]) return prev;
+        const copy = { ...prev };
+        delete copy[k];
+        return copy;
+      });
+      return;
+    }
 
     // 現状値と同一なら無操作（エラーも消す）
     const g = games.find((x) => x.gameNo === s.gameNo);
@@ -629,6 +692,18 @@ const groupedByRole = useMemo(() => {
 
   function clearSlot(s: SelectedSlot) {
     if (!s) return;
+    if (s.slot === "globalBan") {
+      if (globalBanLocked) return;
+      const k = slotKey(s.gameNo, s.side, s.slot, s.index);
+      setGlobalBans((prev) => prev.map((v, i) => (i === s.index ? "" : v)));
+      setErrors((prev) => {
+        if (!prev[k]) return prev;
+        const copy = { ...prev };
+        delete copy[k];
+        return copy;
+      });
+      return;
+    }
       // ✅ P3: ロック済みGameは編集不可
   const targetGame = games.find((g) => g.gameNo === s.gameNo);
   if (targetGame?.locked) return;
@@ -666,6 +741,9 @@ const groupedByRole = useMemo(() => {
     // ✅ 新しい設定で games を正規化
     setGames((prev) =>
       normalizeGamesForConfig(prev, updated.format, updated.banCount)
+    );
+    setGlobalBans((prev) =>
+      updated.globalBanEnabled ? normalizeGlobalBans(prev, updated.banCount) : makeFixed(updated.banCount)
     );
 
     // ✅ currentGameNo を新しい最大値に収める
@@ -721,6 +799,7 @@ function decodeUtf8Base64<T>(b64: string): T | null {
     }
     const next = createGames(config.format, config.banCount);
     setGames(next);
+    setGlobalBans(makeFixed(config.banCount));
     setSelected(null);
     setErrors({});
     setSearch("");
@@ -811,6 +890,7 @@ useEffect(() => {
         const resolved = resolvePersistedState(data.payload);
         setConfig(resolved.config);
         setGames(resolved.games);
+        setGlobalBans(resolved.globalBans);
         setCurrentGameNo(resolved.currentGameNo);
         setTeamAName(resolved.teamAName);
         setTeamBName(resolved.teamBName);
@@ -832,6 +912,7 @@ useEffect(() => {
         const resolved = resolvePersistedState(decoded);
         setConfig(resolved.config);
         setGames(resolved.games);
+        setGlobalBans(resolved.globalBans);
         setCurrentGameNo(resolved.currentGameNo);
         setTeamAName(resolved.teamAName);
         setTeamBName(resolved.teamBName);
@@ -848,6 +929,7 @@ useEffect(() => {
       const resolved = resolvePersistedState(parsed);
       setConfig(resolved.config);
       setGames(resolved.games);
+      setGlobalBans(resolved.globalBans);
       setCurrentGameNo(resolved.currentGameNo);
       setTeamAName(resolved.teamAName);
       setTeamBName(resolved.teamBName);
@@ -884,6 +966,7 @@ useEffect(() => {
       const resolved = resolvePersistedState(data.payload);
       setConfig(resolved.config);
       setGames(resolved.games);
+      setGlobalBans(resolved.globalBans);
       setCurrentGameNo(resolved.currentGameNo);
       setTeamAName(resolved.teamAName);
       setTeamBName(resolved.teamBName);
@@ -910,12 +993,12 @@ useEffect(() => {
   if (!mounted) return;
   if (isReadOnly) return;
   try {
-    const payload = JSON.stringify({ config, games, currentGameNo, teamAName, teamBName, lockHistory });
+    const payload = JSON.stringify({ config, games, globalBans, currentGameNo, teamAName, teamBName, lockHistory });
     localStorage.setItem(STORAGE_KEY_V2, payload);
   } catch {
     // 無視
   }
-}, [mounted, isReadOnly, config, games, currentGameNo, teamAName, teamBName, lockHistory]);
+}, [mounted, isReadOnly, config, games, globalBans, currentGameNo, teamAName, teamBName, lockHistory]);
 
 // ✅ 管理画面：観戦IDがある場合、状態更新をサーバへ自動反映（デバウンス）
 useEffect(() => {
@@ -924,7 +1007,7 @@ useEffect(() => {
   if (!spectateId) return;
   if (!currentSessionWriteKey) return;
 
-  const payload = { config, games, currentGameNo, teamAName, teamBName, lockHistory };
+  const payload = { config, games, globalBans, currentGameNo, teamAName, teamBName, lockHistory };
 
   const t = window.setTimeout(async () => {
     try {
@@ -942,7 +1025,7 @@ useEffect(() => {
   }, 400);
 
   return () => window.clearTimeout(t);
-}, [mounted, isReadOnly, spectateId, currentSessionWriteKey, config, games, currentGameNo, teamAName, teamBName, lockHistory]);
+}, [mounted, isReadOnly, spectateId, currentSessionWriteKey, config, games, globalBans, currentGameNo, teamAName, teamBName, lockHistory]);
 
 
 
@@ -956,6 +1039,7 @@ useEffect(() => {
       <SpectatorScreen
   config={config}
   games={games}
+  globalBans={globalBans}
   currentGameNo={currentGameNo} // ←これは「サーバ（管理側）の現在Game」として渡す
   getNgSetForDisplay={getNgSetForDisplay}
   teamAName={teamAName}
@@ -1082,6 +1166,7 @@ const BTN_DISABLED: CSSProperties = {
           Fearless={config.fearlessScope === "series" ? "Global(シリーズ)" : "GameOnly(ゲーム内)"}
           {" / "}
           NG={config.ngIncludesBans ? "BAN+PICK" : "PICKのみ"}
+          {config.globalBanEnabled ? " / GlobalBANあり" : ""}
         </span>
       </div>
 
@@ -1149,7 +1234,7 @@ style={{
 
 <button
     onClick={async () => {
-    const payload = { config, games, currentGameNo, teamAName, teamBName, lockHistory };
+    const payload = { config, games, globalBans, currentGameNo, teamAName, teamBName, lockHistory };
 
     const res = await fetch("/api/spectate", {
       method: "POST",
@@ -1329,6 +1414,26 @@ style={{
               <option value="pick_only">PICKのみ（オプション）</option>
             </select>
           </label>
+          <label>
+            グローバルBAN：
+            <select
+  value={config.globalBanEnabled ? "enabled" : "disabled"}
+  onChange={(e) => applyConfigPatch({ globalBanEnabled: e.target.value === "enabled" })}
+  disabled={anyLocked || isReadOnly}
+style={{
+  marginLeft: 8,
+  padding: "6px 8px",
+  borderRadius: 8,
+  border: "1px solid #bbb",
+  color: TEXT.primary,
+  background: (anyLocked || isReadOnly) ? "#f3f4f6" : "white",
+  cursor: (anyLocked || isReadOnly) ? "not-allowed" : "pointer",
+}}
+>
+              <option value="disabled">なし</option>
+              <option value="enabled">あり</option>
+            </select>
+          </label>
         </div>
 
         <p style={{ marginTop: 8, color: TEXT.secondary }}>
@@ -1362,7 +1467,7 @@ style={{
           />
 
           <div style={{ marginTop: 10, fontSize: 12, color: TEXT.secondary }}>
-            選択中枠：{selected ? `Game${selected.gameNo} / Team${selected.side} / ${selected.slot.toUpperCase()}-${selected.index + 1}` : "未選択"}
+            選択中枠：{selected ? selected.slot === "globalBan" ? `Global BAN-${selected.index + 1}` : `Game${selected.gameNo} / Team${selected.side} / ${selected.slot.toUpperCase()}-${selected.index + 1}` : "未選択"}
           </div>
 
           <div style={{ marginTop: 10, display: "grid", gap: 10, maxHeight: 520, overflow: "auto" }}>
@@ -1462,7 +1567,8 @@ style={{
               const blockedReason = getBlockedReasonForSelected(p.name);
               const blocked = !!blockedReason;
 
-              const listDisabled = !selected || selectedGameLocked || isReadOnly;
+              const listDisabled =
+                !selected || selectedGameLocked || isReadOnly || (selected?.slot === "globalBan" && globalBanLocked);
 
               const disabled = listDisabled || blocked;
 
@@ -1489,6 +1595,8 @@ style={{
                       ? "ロック済みのGameは編集できません"
                       : isReadOnly
                       ? "観戦モードでは編集できません"
+                      : selected?.slot === "globalBan" && globalBanLocked
+                      ? "Game 1開始後はグローバルBANを変更できません"
                       : blockedReason
                       ? blockedReason
                       : "クリックで選択枠にセット"
@@ -1534,6 +1642,18 @@ style={{
             <h2 style={{ fontSize: 18, fontWeight: 800 }}>試合入力</h2>
 
             <div style={{ display: "grid", gap: 12, marginTop: 10 }}>
+              {config.globalBanEnabled && (
+                <GlobalBanPanel
+                  banCount={config.banCount}
+                  globalBans={globalBans}
+                  selected={selected}
+                  onSelect={(s) => setSelected(s)}
+                  onClear={(s) => clearSlot(s)}
+                  errors={errors}
+                  slotKey={slotKey}
+                  locked={globalBanLocked}
+                />
+              )}
               {games
   .filter((g) => g.gameNo === currentGameNo)
   .map((g) => (
@@ -1574,6 +1694,24 @@ style={{
         {/* 右：使用NG（既存仕様：seriesのみ全体表示） */}
         <div style={{ border: "1px solid #ddd", borderRadius: 10, padding: 12 }}>
           <h2 style={{ fontSize: 18, fontWeight: 800 }}>使用NG</h2>
+
+          {config.globalBanEnabled && (
+            <>
+              <h3 style={{ fontSize: 14, fontWeight: 800 }}>グローバルBAN</h3>
+              {globalBans.some(Boolean) ? (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+                  {globalBans.filter(Boolean).map((name) => (
+                    <span key={name} style={{ border: "1px solid #aaa", borderRadius: 999, padding: "4px 10px" }}>
+                      {name}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p style={{ color: TEXT.secondary }}>まだグローバルBANは未設定です</p>
+              )}
+              <hr style={{ margin: "14px 0" }} />
+            </>
+          )}
 
           {config.fearlessScope === "series" ? (
             usedNgSeries.length === 0 ? (
@@ -1634,7 +1772,7 @@ function TeamPanel(props: {
   onSelect: (s: SelectedSlot) => void;
   onClear: (s: SelectedSlot) => void;
   errors: Record<string, string>;
-  slotKey: (gameNo: number, side: Side, slot: Slot, index: number) => string;
+  slotKey: (gameNo: number, side: DraftSide, slot: Slot, index: number) => string;
 }) {
   const { title, game, side, banCount, selected, onSelect, onClear, errors, slotKey } = props;
 
@@ -1689,6 +1827,50 @@ function TeamPanel(props: {
             );
           })}
         </div>
+      </div>
+    </div>
+  );
+}
+
+
+function GlobalBanPanel(props: {
+  banCount: BanCount;
+  globalBans: string[];
+  selected: SelectedSlot;
+  onSelect: (s: SelectedSlot) => void;
+  onClear: (s: SelectedSlot) => void;
+  errors: Record<string, string>;
+  slotKey: (gameNo: number, side: DraftSide, slot: Slot, index: number) => string;
+  locked: boolean;
+}) {
+  const { banCount, globalBans, selected, onSelect, onClear, errors, slotKey, locked } = props;
+
+  const isSelected = (index: number) =>
+    !!selected && selected.slot === "globalBan" && selected.side === "GLOBAL" && selected.index === index;
+
+  return (
+    <div style={{ border: "1px solid #ddd", borderRadius: 10, padding: 12, background: locked ? "#fafafa" : "white" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+        <h3 style={{ fontSize: 16, fontWeight: 800 }}>グローバルBAN</h3>
+        <span style={{ fontSize: 12, color: TEXT.secondary }}>
+          {locked ? "Game 1開始後は変更できません" : "Game 1開始前の共通使用不可枠です"}
+        </span>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: `repeat(${banCount}, 1fr)`, gap: 8, marginTop: 10 }}>
+        {globalBans.slice(0, banCount).map((v, idx) => {
+          const k = slotKey(0, "GLOBAL", "globalBan", idx);
+          return (
+            <SlotButton
+              key={k}
+              label={v}
+              active={isSelected(idx)}
+              error={errors[k]}
+              onClick={() => onSelect({ gameNo: 0, side: "GLOBAL", slot: "globalBan", index: idx })}
+              onClear={() => onClear({ gameNo: 0, side: "GLOBAL", slot: "globalBan", index: idx })}
+            />
+          );
+        })}
       </div>
     </div>
   );
@@ -1750,13 +1932,14 @@ function SlotButton(props: {
 function SpectatorScreen(props: {
   config: SeriesConfig;
   games: Game[];
+  globalBans: string[];
   currentGameNo: number;
   getNgSetForDisplay: (gameNo: number) => Set<string>;
   teamAName: string;
   teamBName: string;
   error?: string;
 }) {
-  const { config, games, currentGameNo, getNgSetForDisplay, teamAName, teamBName, error } = props;
+  const { config, games, globalBans, currentGameNo, getNgSetForDisplay, teamAName, teamBName, error } = props;
   const [manualViewGameNo, setManualViewGameNo] = useState<number | null>(null);
 
   const maxGameNo = config.format === "BO5" ? 5 : 3;
@@ -1789,6 +1972,13 @@ function SpectatorScreen(props: {
             Bo={config.format} / Fearless={config.fearlessScope === "series" ? "Global(シリーズ)" : "GameOnly(ゲーム内)"} / NG表示={config.ngIncludesBans ? "BAN+PICK" : "PICKのみ"}
           </div>
           <div style={{ marginTop: 6, fontSize: 13, color: UNITE.text }}>{teamAName} vs {teamBName}</div>
+          {config.globalBanEnabled && globalBans.some(Boolean) ? (
+            <div style={{ marginTop: 8, display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {globalBans.filter(Boolean).map((name) => (
+                <span key={name} style={spectatorChipStyle("#ef4444")}>{name}</span>
+              ))}
+            </div>
+          ) : null}
         </div>
 
         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -1884,3 +2074,5 @@ function SpectatorScreen(props: {
     </main>
   );
 }
+
+
