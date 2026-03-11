@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import { POKEMON_LIST, ROLE_META, matchesPokemonSearch } from "./data/pokemons";
 import type { Pokemon, Role } from "./data/pokemons";
@@ -36,6 +36,15 @@ type SelectedSlot = {
   index: number;
 } | null;
 
+type PersistedState = {
+  config?: SeriesConfig;
+  games?: Game[];
+  currentGameNo?: number;
+  teamAName?: string;
+  teamBName?: string;
+  lockHistory?: number[];
+};
+
 function normalizeName(s: string) {
   return s.replace(/\u3000/g, " ").trim();
 }
@@ -57,7 +66,7 @@ function createGames(format: Format, banCount: BanCount): Game[] {
 }
 
 // 既存データ（可変長配列・空欄なし配列等）を固定枠に正規化
-function normalizeGameShape(g: Game, banCount: BanCount): Game {
+function normalizeGameShape(g: Partial<Game>, banCount: BanCount): Game {
   const fixTo = (arr: string[] | undefined, n: number) => {
     const base = Array.isArray(arr) ? arr.slice(0, n) : [];
     while (base.length < n) base.push("");
@@ -66,11 +75,12 @@ function normalizeGameShape(g: Game, banCount: BanCount): Game {
 
   return {
     ...g,
-    locked: typeof (g as any).locked === "boolean" ? (g as any).locked : false, // ✅追加
-    bansA: fixTo((g as any).bansA, banCount),
-    bansB: fixTo((g as any).bansB, banCount),
-    picksA: fixTo((g as any).picksA, 5),
-    picksB: fixTo((g as any).picksB, 5),
+    gameNo: typeof g.gameNo === "number" ? g.gameNo : 1,
+    locked: typeof g.locked === "boolean" ? g.locked : false,
+    bansA: fixTo(g.bansA, banCount),
+    bansB: fixTo(g.bansB, banCount),
+    picksA: fixTo(g.picksA, 5),
+    picksB: fixTo(g.picksB, 5),
   };
 }
 
@@ -99,7 +109,209 @@ const TEXT = {
 };
 
 // 左一覧：検索フィルタ
-  const ROLE_ORDER: Role[] = ["アタック型", "バランス型", "スピード型", "ディフェンス型", "サポート型"];
+const ROLE_ORDER: Role[] = ["アタック型", "バランス型", "スピード型", "ディフェンス型", "サポート型"];
+
+const UNITE = {
+  bg2: "#0f1630",
+  panel: "#111a33",
+  border: "rgba(255,255,255,0.10)",
+  text: "#eaf0ff",
+  text2: "rgba(234,240,255,0.78)",
+};
+
+const SPECTATOR_PANEL: CSSProperties = {
+  border: `1px solid ${UNITE.border}`,
+  borderRadius: 16,
+  padding: 14,
+  background: `linear-gradient(180deg, ${UNITE.bg2} 0%, ${UNITE.panel} 100%)`,
+  color: UNITE.text,
+  boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+};
+
+function resolvePersistedState(source: PersistedState) {
+  const config: SeriesConfig = {
+    format: source.config?.format ?? "BO5",
+    banCount: source.config?.banCount ?? 3,
+    fearlessScope: source.config?.fearlessScope ?? "series",
+    ngIncludesBans: source.config?.ngIncludesBans ?? true,
+  };
+
+  const games = normalizeGamesForConfig(
+    source.games ?? createGames(config.format, config.banCount),
+    config.format,
+    config.banCount
+  );
+
+  const maxGameNo = config.format === "BO5" ? 5 : 3;
+  const currentGameNo = (
+    typeof source.currentGameNo === "number"
+      ? Math.min(Math.max(source.currentGameNo, 1), maxGameNo)
+      : 1
+  );
+
+  return {
+    config,
+    games,
+    currentGameNo,
+    teamAName: typeof source.teamAName === "string" && source.teamAName.trim() ? source.teamAName : "Team A",
+    teamBName: typeof source.teamBName === "string" && source.teamBName.trim() ? source.teamBName : "Team B",
+    lockHistory: Array.isArray(source.lockHistory)
+      ? source.lockHistory.filter((n): n is number => typeof n === "number")
+      : [],
+  };
+}
+
+function groupPokemonByRole(list: Pokemon[]) {
+  const map = new Map<Role, Pokemon[]>();
+  for (const r of ROLE_ORDER) map.set(r, []);
+  for (const p of list) map.get(p.role)?.push(p);
+  for (const r of ROLE_ORDER) {
+    map.set(r, (map.get(r) ?? []).slice().sort((a, b) => a.name.localeCompare(b.name, "ja")));
+  }
+  return map;
+}
+
+function spectatorChipStyle(accent: string): CSSProperties {
+  return {
+    border: "1px solid #d1d5db",
+    borderRadius: 999,
+    padding: "6px 10px",
+    fontWeight: 900,
+    fontSize: 12,
+    color: "#111827",
+    background: "white",
+    boxShadow: `inset 3px 0 0 ${accent}`,
+    whiteSpace: "nowrap",
+  };
+}
+
+function SpectatorRoleRow(props: {
+  title: string;
+  byRole: Map<Role, Pokemon[]>;
+  note?: string;
+}) {
+  const { title, byRole, note } = props;
+
+  return (
+    <section style={SPECTATOR_PANEL}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <h2 style={{ margin: 0, fontSize: 18, fontWeight: 900 }}>{title}</h2>
+        {note ? <div style={{ fontSize: 12, color: UNITE.text2 }}>{note}</div> : null}
+      </div>
+
+      <div
+        style={{
+          marginTop: 12,
+          display: "grid",
+          gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
+          gap: 10,
+        }}
+      >
+        {ROLE_ORDER.map((role) => {
+          const meta = ROLE_META[role];
+          const list = byRole.get(role) ?? [];
+          return (
+            <div key={role} style={{ border: "1px solid #eee", borderRadius: 12, overflow: "hidden" }}>
+              <div style={{ padding: "10px 10px", background: "#ffffff", borderBottom: "1px solid #eee" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                  <span style={{ fontWeight: 900, ...meta.headerStyle }}>{role}</span>
+                  <span
+                    style={{
+                      ...meta.badgeStyle,
+                      borderRadius: 999,
+                      padding: "2px 8px",
+                      fontSize: 11,
+                      fontWeight: 900,
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {meta.short}
+                  </span>
+                </div>
+                <div style={{ marginTop: 4, fontSize: 12, color: TEXT.muted }}>{list.length} 体</div>
+              </div>
+
+              <div style={{ padding: 10, display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {list.length === 0 ? (
+                  <span style={{ fontSize: 12, color: TEXT.muted }}>該当なし</span>
+                ) : (
+                  list.map((p) => (
+                    <span key={p.name} style={spectatorChipStyle(meta.leftAccent)}>
+                      {p.name}
+                    </span>
+                  ))
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function SpectatorDraftCard(props: { title: string; items: string[]; pokemonByName: Map<string, Pokemon> }) {
+  const { title, items, pokemonByName } = props;
+
+  return (
+    <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 10, background: "white" }}>
+      <div style={{ fontWeight: 900, marginBottom: 6, color: "#000000" }}>{title}</div>
+      {items.length === 0 ? (
+        <div style={{ fontSize: 12, color: TEXT.muted }}>未入力</div>
+      ) : (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {items.map((x, i) => {
+            const p = pokemonByName.get(x);
+            const accent = p ? ROLE_META[p.role].leftAccent : "#9ca3af";
+            return (
+              <span key={`${title}-${x}-${i}`} style={spectatorChipStyle(accent)}>
+                {x}
+              </span>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SpectatorDraftSummary(props: {
+  game?: Game;
+  teamAName: string;
+  teamBName: string;
+  pokemonByName: Map<string, Pokemon>;
+}) {
+  const { game, teamAName, teamBName, pokemonByName } = props;
+  if (!game) return null;
+
+  const bansA = game.bansA.filter(Boolean);
+  const bansB = game.bansB.filter(Boolean);
+  const picksA = game.picksA.filter(Boolean);
+  const picksB = game.picksB.filter(Boolean);
+
+  return (
+    <section style={SPECTATOR_PANEL}>
+      <h2 style={{ margin: 0, fontSize: 18, fontWeight: 900 }}>このGameのBAN / PICK</h2>
+      <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 10, background: "#7700ff" }}>
+          <div style={{ fontWeight: 900, marginBottom: 8 }}>{teamAName}</div>
+          <div style={{ display: "grid", gap: 10 }}>
+            <SpectatorDraftCard title="BAN" items={bansA} pokemonByName={pokemonByName} />
+            <SpectatorDraftCard title="PICK" items={picksA} pokemonByName={pokemonByName} />
+          </div>
+        </div>
+
+        <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 10, background: "#ff8800" }}>
+          <div style={{ fontWeight: 900, marginBottom: 8 }}>{teamBName}</div>
+          <div style={{ display: "grid", gap: 10 }}>
+            <SpectatorDraftCard title="BAN" items={bansB} pokemonByName={pokemonByName} />
+            <SpectatorDraftCard title="PICK" items={picksB} pokemonByName={pokemonByName} />
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
 
 export default function Home() {
     const STORAGE_KEY_V2 = "unite-fearless:v2";
@@ -147,6 +359,7 @@ export default function Home() {
   const [isReadOnly, setIsReadOnly] = useState(false);
 const [spectateId, setSpectateId] = useState<string>(""); // ✅ 観戦セッションID
 const [spectatorUrl, setSpectatorUrl] = useState<string>(""); // ✅ 観戦URL（表示/コピー用）
+  const [spectateError, setSpectateError] = useState("");
 
   // 枠選択（P0の中核）
   const [selected, setSelected] = useState<SelectedSlot>(null);
@@ -180,11 +393,6 @@ const [spectatorUrl, setSpectatorUrl] = useState<string>(""); // ✅ 観戦URL�
     });
   }
 
-  useEffect(() => {
-  const q = normalizeName(search);
-  if (q) setAllRolesCollapsed(false);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [search]);
 
   // P2: 現在進行中のGame
 const [currentGameNo, setCurrentGameNo] = useState<number>(1);
@@ -195,31 +403,6 @@ const [teamBName, setTeamBName] = useState<string>("Team B");
 
 // ✅ P3: ロック操作の履歴（Undoは直近のみ）
 const [lockHistory, setLockHistory] = useState<number[]>([]);
-
-function pruneErrorsByConfig(
-  prev: Record<string, string>,
-  format: Format,
-  banCount: BanCount
-) {
-  const maxGameNo = format === "BO5" ? 5 : 3;
-
-  const copy: Record<string, string> = {};
-  for (const [k, v] of Object.entries(prev)) {
-    // key: `${gameNo}-${side}-${slot}-${index}`
-    const parts = k.split("-");
-    if (parts.length !== 4) continue;
-
-    const gameNo = Number(parts[0]);
-    const slot = parts[2] as Slot;
-    const index = Number(parts[3]);
-
-    if (!(gameNo >= 1 && gameNo <= maxGameNo)) continue;
-    if (slot === "ban" && index >= banCount) continue;
-
-    copy[k] = v;
-  }
-  return copy;
-}
 
 
   function slotKey(gameNo: number, side: Side, slot: Slot, index: number) {
@@ -330,10 +513,11 @@ function collectUsedForDupCheck(g: Game): string[] {
   const usedNgSeries = useMemo(() => {
     const used = new Set<string>();
     for (const g of games) {
-      collectUsedFromGame(g).forEach((name) => used.add(name));
+      const picks = [...g.picksA, ...g.picksB].filter(Boolean);
+      const source = config.ngIncludesBans ? [...g.bansA, ...g.bansB, ...picks] : picks;
+      source.filter(Boolean).forEach((name) => used.add(name));
     }
     return Array.from(used).sort();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [games, config.ngIncludesBans]);
 
 const filteredList = useMemo<Pokemon[]>(() => {
@@ -517,7 +701,7 @@ function updateBanCount(next: BanCount) {
   applyConfigPatch({ banCount: next });
 }
 
-function encodeUtf8Base64(obj: any) {
+function encodeUtf8Base64(obj: unknown) {
   const json = JSON.stringify(obj);
   const bytes = new TextEncoder().encode(json);
   let binary = "";
@@ -596,12 +780,12 @@ function undoUnlockLast() {
 
 // マウント後にLocalStorageから復元（v2優先、無ければv1を移行）
 useEffect(() => {
-  setMounted(true);
+  queueMicrotask(() => setMounted(true));
 
   try {
     const savedWriteToken = localStorage.getItem(STORAGE_KEY_WRITE_TOKEN) ?? "";
     if (savedWriteToken.trim()) {
-      setWriteToken(savedWriteToken.trim());
+      queueMicrotask(() => setWriteToken(savedWriteToken.trim()));
     }
   } catch {
     // 無視
@@ -610,158 +794,76 @@ useEffect(() => {
   (async () => {
     try {
       const params = new URLSearchParams(window.location.search);
+      const urlSpectateId = params.get("spectateId")?.trim() ?? "";
 
-      // ✅ 1) spectateId（短縮ID）優先で復元
-      const spectateId = params.get("spectateId");
-      if (spectateId) setSpectateId(spectateId); // ✅ 観戦側のポーリング対象
+      if (urlSpectateId) {
+        setSpectateId(urlSpectateId);
+        setIsReadOnly(true);
 
-      if (spectateId) {
-        const res = await fetch(`/api/spectate?id=${encodeURIComponent(spectateId)}`);
-        if (res.ok) {
-          const data = (await res.json()) as {
-            payload?: {
-              config?: SeriesConfig;
-              games?: Game[];
-              currentGameNo?: number;
-              teamAName?: string;
-              teamBName?: string;
-              lockHistory?: number[];
-            };
-          };
-
-          const decoded = data.payload;
-          if (decoded) {
-            const nextConfig: SeriesConfig = {
-              format: decoded.config?.format ?? "BO5",
-              banCount: decoded.config?.banCount ?? 3,
-              fearlessScope: decoded.config?.fearlessScope ?? "series",
-              ngIncludesBans: decoded.config?.ngIncludesBans ?? true,
-            };
-
-            setConfig(nextConfig);
-
-            const baseGames = decoded.games ?? createGames(nextConfig.format, nextConfig.banCount);
-            setGames(normalizeGamesForConfig(baseGames as Game[], nextConfig.format, nextConfig.banCount));
-
-            const loaded = decoded.currentGameNo ?? 1;
-            const maxGameNo = nextConfig.format === "BO5" ? 5 : 3;
-            const fixed =
-              typeof loaded !== "number" ? 1 : loaded < 1 ? 1 : loaded > maxGameNo ? maxGameNo : loaded;
-            setCurrentGameNo(fixed);
-
-            setTeamAName(typeof decoded.teamAName === "string" && decoded.teamAName.trim() ? decoded.teamAName : "Team A");
-            setTeamBName(typeof decoded.teamBName === "string" && decoded.teamBName.trim() ? decoded.teamBName : "Team B");
-
-            setLockHistory(
-              Array.isArray(decoded.lockHistory)
-                ? decoded.lockHistory.filter((n) => typeof n === "number")
-                : []
-            );
-
-            setIsReadOnly(true);
-            return; // ✅ spectateId 復元成功なら以降は実行しない
-          }
+        const res = await fetch(`/api/spectate?id=${encodeURIComponent(urlSpectateId)}`, { cache: "no-store" });
+        if (!res.ok) {
+          setSpectateError("観戦URLが無効か期限切れです。管理者に新しいURLを確認してください。");
+          return;
         }
 
-        // spectateId が不正/期限切れ等の場合はフォールバック（LocalStorageへ）
+        const data = (await res.json()) as { payload?: PersistedState };
+        if (!data.payload) {
+          setSpectateError("観戦データを読み込めませんでした。管理者に新しいURLを確認してください。");
+          return;
+        }
+
+        const resolved = resolvePersistedState(data.payload);
+        setConfig(resolved.config);
+        setGames(resolved.games);
+        setCurrentGameNo(resolved.currentGameNo);
+        setTeamAName(resolved.teamAName);
+        setTeamBName(resolved.teamBName);
+        setLockHistory(resolved.lockHistory);
+        setSpectateError("");
+        return;
       }
 
-      // ✅ 2) 旧方式 spectate（base64）で復元
       const spectate = params.get("spectate");
       if (spectate) {
-        const decoded = decodeUtf8Base64<{
-          config?: SeriesConfig;
-          games?: Game[];
-          currentGameNo?: number;
-          teamAName?: string;
-          teamBName?: string;
-          lockHistory?: number[];
-        }>(spectate);
+        const decoded = decodeUtf8Base64<PersistedState>(spectate);
+        setIsReadOnly(true);
 
-        if (decoded) {
-          const nextConfig: SeriesConfig = {
-            format: decoded.config?.format ?? "BO5",
-            banCount: decoded.config?.banCount ?? 3,
-            fearlessScope: decoded.config?.fearlessScope ?? "series",
-            ngIncludesBans: decoded.config?.ngIncludesBans ?? true,
-          };
-
-          setConfig(nextConfig);
-
-          const baseGames = decoded.games ?? createGames(nextConfig.format, nextConfig.banCount);
-          setGames(normalizeGamesForConfig(baseGames as Game[], nextConfig.format, nextConfig.banCount));
-
-          const loaded = decoded.currentGameNo ?? 1;
-          const maxGameNo = nextConfig.format === "BO5" ? 5 : 3;
-          const fixed =
-            typeof loaded !== "number" ? 1 : loaded < 1 ? 1 : loaded > maxGameNo ? maxGameNo : loaded;
-          setCurrentGameNo(fixed);
-
-          setTeamAName(typeof decoded.teamAName === "string" && decoded.teamAName.trim() ? decoded.teamAName : "Team A");
-          setTeamBName(typeof decoded.teamBName === "string" && decoded.teamBName.trim() ? decoded.teamBName : "Team B");
-
-          setLockHistory(
-            Array.isArray(decoded.lockHistory)
-              ? decoded.lockHistory.filter((n) => typeof n === "number")
-              : []
-          );
-
-          setIsReadOnly(true);
-          return; // ✅ URL復元したらLocalStorage復元はスキップ
+        if (!decoded) {
+          setSpectateError("観戦URLを読み込めませんでした。管理者に新しいURLを確認してください。");
+          return;
         }
+
+        const resolved = resolvePersistedState(decoded);
+        setConfig(resolved.config);
+        setGames(resolved.games);
+        setCurrentGameNo(resolved.currentGameNo);
+        setTeamAName(resolved.teamAName);
+        setTeamBName(resolved.teamBName);
+        setLockHistory(resolved.lockHistory);
+        setSpectateError("");
+        return;
       }
 
-      // ✅ 3) LocalStorage から復元（v2優先、無ければv1）
       const rawV2 = localStorage.getItem(STORAGE_KEY_V2);
       const raw = rawV2 ?? localStorage.getItem(STORAGE_KEY_V1);
       if (!raw) return;
 
-      const parsed = JSON.parse(raw) as {
-        config?: SeriesConfig;
-        games?: Game[];
-        currentGameNo?: number;
-        teamAName?: string;
-        teamBName?: string;
-        lockHistory?: number[];
-      };
-
-      const nextConfig: SeriesConfig = {
-        format: parsed.config?.format ?? "BO5",
-        banCount: parsed.config?.banCount ?? 3,
-        fearlessScope: parsed.config?.fearlessScope ?? "series",
-        ngIncludesBans: parsed.config?.ngIncludesBans ?? true,
-      };
-
-      setConfig(nextConfig);
-
-      const baseGames = parsed.games ?? createGames(nextConfig.format, nextConfig.banCount);
-      setGames(normalizeGamesForConfig(baseGames as Game[], nextConfig.format, nextConfig.banCount));
-
-      const loaded = parsed.currentGameNo ?? 1;
-      const maxGameNo = nextConfig.format === "BO5" ? 5 : 3;
-      const fixed =
-        typeof loaded !== "number" ? 1 :
-        loaded < 1 ? 1 :
-        loaded > maxGameNo ? maxGameNo :
-        loaded;
-
-      setCurrentGameNo(fixed);
-
-      setTeamAName(typeof parsed.teamAName === "string" && parsed.teamAName.trim() ? parsed.teamAName : "Team A");
-      setTeamBName(typeof parsed.teamBName === "string" && parsed.teamBName.trim() ? parsed.teamBName : "Team B");
-
-      setLockHistory(
-        Array.isArray(parsed.lockHistory)
-          ? parsed.lockHistory.filter((n) => typeof n === "number")
-          : []
-      );
+      const parsed = JSON.parse(raw) as PersistedState;
+      const resolved = resolvePersistedState(parsed);
+      setConfig(resolved.config);
+      setGames(resolved.games);
+      setCurrentGameNo(resolved.currentGameNo);
+      setTeamAName(resolved.teamAName);
+      setTeamBName(resolved.teamBName);
+      setLockHistory(resolved.lockHistory);
+      setSpectateError("");
     } catch {
-      // 破損は無視
+      setSpectateError((current) => current || "保存データの読み込みに失敗しました。");
     }
   })();
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
 }, []);
+
 // ✅ 観戦画面：サーバの最新状態を定期取得してリアルタイム反映
 useEffect(() => {
   if (!mounted) return;
@@ -773,52 +875,33 @@ useEffect(() => {
   const tick = async () => {
     try {
       const res = await fetch(`/api/spectate?id=${encodeURIComponent(spectateId)}`, { cache: "no-store" });
-      if (!res.ok) return;
+      if (!res.ok) {
+        if (alive) {
+          setSpectateError("観戦データの更新に失敗しました。ページを再読み込みしてください。");
+        }
+        return;
+      }
 
-      const data = (await res.json()) as {
-        payload?: {
-          config?: SeriesConfig;
-          games?: Game[];
-          currentGameNo?: number;
-          teamAName?: string;
-          teamBName?: string;
-          lockHistory?: number[];
-        };
-      };
+      const data = (await res.json()) as { payload?: PersistedState };
+      if (!alive || !data.payload) return;
 
-      if (!alive) return;
-      if (!data.payload) return;
-
-      const decoded = data.payload;
-
-      const nextConfig: SeriesConfig = {
-        format: decoded.config?.format ?? "BO5",
-        banCount: decoded.config?.banCount ?? 3,
-        fearlessScope: decoded.config?.fearlessScope ?? "series",
-        ngIncludesBans: decoded.config?.ngIncludesBans ?? true,
-      };
-
-      setConfig(nextConfig);
-
-      const baseGames = decoded.games ?? createGames(nextConfig.format, nextConfig.banCount);
-      setGames(normalizeGamesForConfig(baseGames as Game[], nextConfig.format, nextConfig.banCount));
-
-      const loaded = decoded.currentGameNo ?? 1;
-      const max = nextConfig.format === "BO5" ? 5 : 3;
-      setCurrentGameNo(typeof loaded === "number" ? Math.min(Math.max(1, loaded), max) : 1);
-
-      setTeamAName(typeof decoded.teamAName === "string" && decoded.teamAName.trim() ? decoded.teamAName : "Team A");
-      setTeamBName(typeof decoded.teamBName === "string" && decoded.teamBName.trim() ? decoded.teamBName : "Team B");
-
-      setLockHistory(Array.isArray(decoded.lockHistory) ? decoded.lockHistory.filter((n) => typeof n === "number") : []);
+      const resolved = resolvePersistedState(data.payload);
+      setConfig(resolved.config);
+      setGames(resolved.games);
+      setCurrentGameNo(resolved.currentGameNo);
+      setTeamAName(resolved.teamAName);
+      setTeamBName(resolved.teamBName);
+      setLockHistory(resolved.lockHistory);
+      setSpectateError("");
     } catch {
-      // 無視
+      if (alive) {
+        setSpectateError("観戦データの更新に失敗しました。ページを再読み込みしてください。");
+      }
     }
   };
 
-  tick(); // 初回即時
-  const id = window.setInterval(tick, 2000); // ✅ 2秒（API負荷を約1/2）
-
+  tick();
+  const id = window.setInterval(tick, 2000);
 
   return () => {
     alive = false;
@@ -826,26 +909,24 @@ useEffect(() => {
   };
 }, [mounted, isReadOnly, spectateId]);
 
-
-  // 永続化（v2）
-  useEffect(() => {
-  if (!mounted) return;
-  if (isReadOnly) return; // ✅ 観戦URLでは永続化しない
-  try {
-
-      const payload = JSON.stringify({ config, games, currentGameNo, teamAName, teamBName, lockHistory });
-localStorage.setItem(STORAGE_KEY_V2, payload);
-    } catch {
-      // 無視
-    }
-  }, [mounted, isReadOnly, config, games, currentGameNo, teamAName, teamBName, lockHistory]);
-
-  // ✅ 管理画面：観戦IDがある場合、状態更新をサーバへ自動反映（デバウンス）
+// 永続化（v2）
 useEffect(() => {
   if (!mounted) return;
-  if (isReadOnly) return;        // 観戦画面では送らない
-  if (!spectateId) return;       // 観戦URL未発行なら送らない
-  if (!writeToken.trim()) return; // トークン未入力なら送らない
+  if (isReadOnly) return;
+  try {
+    const payload = JSON.stringify({ config, games, currentGameNo, teamAName, teamBName, lockHistory });
+    localStorage.setItem(STORAGE_KEY_V2, payload);
+  } catch {
+    // 無視
+  }
+}, [mounted, isReadOnly, config, games, currentGameNo, teamAName, teamBName, lockHistory]);
+
+// ✅ 管理画面：観戦IDがある場合、状態更新をサーバへ自動反映（デバウンス）
+useEffect(() => {
+  if (!mounted) return;
+  if (isReadOnly) return;
+  if (!spectateId) return;
+  if (!writeToken.trim()) return;
 
   const payload = { config, games, currentGameNo, teamAName, teamBName, lockHistory };
 
@@ -881,6 +962,9 @@ useEffect(() => {
   games={games}
   currentGameNo={currentGameNo} // ←これは「サーバ（管理側）の現在Game」として渡す
   getNgSetForDisplay={getNgSetForDisplay}
+  teamAName={teamAName}
+  teamBName={teamBName}
+  error={spectateError}
 />
 
     );
@@ -1270,7 +1354,11 @@ style={{
 
           <input
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => {
+              const next = e.target.value;
+              setSearch(next);
+              if (normalizeName(next)) setAllRolesCollapsed(false);
+            }}
             placeholder="検索（例：ミュウ）"
             style={{
   width: "100%",
@@ -1672,350 +1760,132 @@ function SlotButton(props: {
 function SpectatorScreen(props: {
   config: SeriesConfig;
   games: Game[];
-  currentGameNo: number; // ✅ サーバ（管理側）の現在Game
+  currentGameNo: number;
   getNgSetForDisplay: (gameNo: number) => Set<string>;
+  teamAName: string;
+  teamBName: string;
+  error?: string;
 }) {
-
-  const { config, games, currentGameNo, getNgSetForDisplay } = props;
-
-// ✅ 観戦者が見ているGame（Prev/Nextで変わるのはこれ）
-const [viewGameNo, setViewGameNo] = useState<number>(currentGameNo);
-
-// ✅ 最後に受け取ったサーバGame（追従判定用）
-const lastServerGameNoRef = useRef<number>(currentGameNo);
-
-// ✅ サーバの currentGameNo が変わったとき：観戦側がまだ手動で動かしていなければ追従する
-useEffect(() => {
-  const lastServer = lastServerGameNoRef.current;
-  const viewerIsFollowing = viewGameNo === lastServer;
-
-  lastServerGameNoRef.current = currentGameNo;
-
-  if (viewerIsFollowing) setViewGameNo(currentGameNo);
-}, [currentGameNo, viewGameNo]);
- // eslint-disable-line react-hooks/exhaustive-deps
-
-// ✅ BO3/BO5 切替などで範囲外になった場合はクランプ
-useEffect(() => {
-  const max = config.format === "BO5" ? 5 : 3;
-  setViewGameNo((n) => Math.min(Math.max(1, n), max));
-}, [config.format]);
-
+  const { config, games, currentGameNo, getNgSetForDisplay, teamAName, teamBName, error } = props;
+  const [manualViewGameNo, setManualViewGameNo] = useState<number | null>(null);
 
   const maxGameNo = config.format === "BO5" ? 5 : 3;
-
-    const currentGame = useMemo(
-  () => games.find((g) => g.gameNo === viewGameNo),
-  [games, viewGameNo]
-);
-
-  // 現在Gameの「使用不可（NG）」集合（表示ルールは既存ロジックを流用）
+  const viewGameNo = Math.min(Math.max(1, manualViewGameNo ?? currentGameNo), maxGameNo);
+  const currentGame = useMemo(() => games.find((g) => g.gameNo === viewGameNo), [games, viewGameNo]);
   const ngSet = useMemo(() => getNgSetForDisplay(viewGameNo), [getNgSetForDisplay, viewGameNo]);
+  const pickable = useMemo(() => POKEMON_LIST.filter((p) => !ngSet.has(p.name)), [ngSet]);
+  const unpickable = useMemo(() => POKEMON_LIST.filter((p) => ngSet.has(p.name)), [ngSet]);
+  const pickableByRole = useMemo(() => groupPokemonByRole(pickable), [pickable]);
+  const unpickableByRole = useMemo(() => groupPokemonByRole(unpickable), [unpickable]);
+  const pokemonByName = useMemo(() => new Map<string, Pokemon>(POKEMON_LIST.map((p) => [p.name, p])), []);
 
-
-  // 全ポケモンを「Pick可能 / 使用不可」に分割
-  const pickable = useMemo(() => {
-    return POKEMON_LIST.filter((p) => !ngSet.has(p.name));
-  }, [ngSet]);
-
-  const unpickable = useMemo(() => {
-    return POKEMON_LIST.filter((p) => ngSet.has(p.name));
-  }, [ngSet]);
-
-  // ロール別にまとめる（横並び表示用）
-  const groupByRole = (list: Pokemon[]) => {
-    const map = new Map<Role, Pokemon[]>();
-    for (const r of ROLE_ORDER) map.set(r, []);
-    for (const p of list) map.get(p.role)!.push(p);
-    for (const r of ROLE_ORDER) {
-      map.set(
-        r,
-        (map.get(r) ?? []).slice().sort((a, b) => a.name.localeCompare(b.name, "ja"))
-      );
-    }
-    return map;
-  };
-
-  const pickableByRole = useMemo(() => groupByRole(pickable), [pickable]);
-  const unpickableByRole = useMemo(() => groupByRole(unpickable), [unpickable]);
-
-  // ✅ 名前→Pokemon（role判定用）
-const POKEMON_BY_NAME = useMemo(() => {
-  return new Map<string, Pokemon>(POKEMON_LIST.map((p) => [p.name, p]));
-}, []);
-
-
-    // ✅ UNITE風（観戦UI専用）カラートークン
-  const UNITE = {
-    bg: "#0b1020",         // 全体背景（深いネイビー）
-    bg2: "#0f1630",        // パネル背景
-    panel: "#111a33",      // カード面
-    border: "rgba(255,255,255,0.10)",
-    text: "#eaf0ff",
-    text2: "rgba(234,240,255,0.78)",
-    text3: "rgba(234,240,255,0.55)",
-
-    // ユナイトっぽい “紫×オレンジ×シアン”
-    purple: "#7c3aed",
-    purple2: "#a78bfa",
-    orange: "#f59e0b",
-    cyan: "#22d3ee",
-
-    // 状態表現
-    ok: "rgba(34,211,238,0.18)",
-    ng: "rgba(245,158,11,0.18)",
-  };
-
-  const shadowSoft = "0 10px 30px rgba(0,0,0,0.35)";
-  const glowPurple = "0 0 0 1px rgba(124,58,237,0.35), 0 0 24px rgba(124,58,237,0.25)";
-  const glowCyan   = "0 0 0 1px rgba(34,211,238,0.28), 0 0 22px rgba(34,211,238,0.18)";
-
-    const PANEL: CSSProperties = {
-    border: `1px solid ${UNITE.border}`,
-    borderRadius: 16,
-    padding: 14,
-    background: `linear-gradient(180deg, ${UNITE.bg2} 0%, ${UNITE.panel} 100%)`,
-    color: UNITE.text,
-    boxShadow: shadowSoft,
-  };
-
-
-  // ✅ チップ（全セクション共通）：白背景・黒文字・タイプ別縁取り（左アクセント）
-const chipStyle = (accent: string): CSSProperties => ({
-  border: "1px solid #d1d5db",
-  borderRadius: 999,
-  padding: "6px 10px",
-  fontWeight: 900,
-  fontSize: 12,
-  color: "#111827",      // ✅ 黒文字
-  background: "white",   // ✅ 白背景
-  boxShadow: `inset 3px 0 0 ${accent}`, // ✅ 左アクセント
-  whiteSpace: "nowrap",
-});
-
-
-  const RoleRow = (props2: { title: string; byRole: Map<Role, Pokemon[]>; note?: string }) => {
-    const { title, byRole, note } = props2;
+  if (error) {
     return (
-      <section style={PANEL}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
-          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 900 }}>{title}</h2>
-          {note ? <div style={{ fontSize: 12, color: UNITE.text2 }}>{note}</div> : null}
-
-        </div>
-
-        {/* 横並び（ロール別カラム） */}
-        <div
-          style={{
-            marginTop: 12,
-            display: "grid",
-            gridTemplateColumns: "repeat(5, minmax(0, 1fr))",
-            gap: 10,
-          }}
-        >
-          {ROLE_ORDER.map((role) => {
-            const meta = ROLE_META[role];
-            const list = byRole.get(role) ?? [];
-            return (
-              <div key={role} style={{ border: "1px solid #eee", borderRadius: 12, overflow: "hidden" }}>
-                <div style={{ padding: "10px 10px", background: "#ffffff", borderBottom: "1px solid #eee" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
-                    <span style={{ fontWeight: 900, ...meta.headerStyle }}>{role}</span>
-                    <span
-                      style={{
-                        ...meta.badgeStyle,
-                        borderRadius: 999,
-                        padding: "2px 8px",
-                        fontSize: 11,
-                        fontWeight: 900,
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {meta.short}
-                    </span>
-                  </div>
-                  <div style={{ marginTop: 4, fontSize: 12, color: TEXT.muted }}>{list.length} 体</div>
-                </div>
-
-                <div style={{ padding: 10, display: "flex", flexWrap: "wrap", gap: 8 }}>
-                  {list.length === 0 ? (
-                    <span style={{ fontSize: 12, color: TEXT.muted }}>該当なし</span>
-                  ) : (
-                    list.map((p) => (
-  <span key={p.name} style={chipStyle(meta.leftAccent)}>
-    {p.name}
-  </span>
-))
-
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </section>
+      <main style={{ padding: 24, fontFamily: "system-ui", background: "#f3f4f6", minHeight: "100vh" }}>
+        <section style={SPECTATOR_PANEL}>
+          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 900 }}>観戦モード（読み取り専用）</h1>
+          <p style={{ marginTop: 12, color: UNITE.text }}>{error}</p>
+        </section>
+      </main>
     );
-  };
-
-    const DraftSummary = () => {
-    const g = currentGame;
-    if (!g) return null;
-
-    const bansA = g.bansA.filter(Boolean);
-    const bansB = g.bansB.filter(Boolean);
-    const picksA = g.picksA.filter(Boolean);
-    const picksB = g.picksB.filter(Boolean);
-
-    const Card = (props3: { title: string; items: string[] }) => {
-      const { title, items } = props3;
-      return (
-        <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 10, background: "white" }}>
-          <div style={{ fontWeight: 900, marginBottom: 6, color: "#000000" }}>{title}</div>
-
-          {items.length === 0 ? (
-            <div style={{ fontSize: 12, color: TEXT.muted }}>未入力</div>
-          ) : (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-              {items.map((x, i) => {
-  const p = POKEMON_BY_NAME.get(x);
-  const accent = p ? ROLE_META[p.role].leftAccent : "#9ca3af"; // 見つからない時はグレー
-  return (
-    <span key={`${title}-${x}-${i}`} style={chipStyle(accent)}>
-      {x}
-    </span>
-  );
-})}
-
-            </div>
-          )}
-        </div>
-      );
-    };
-
-    return (
-      <section style={PANEL}>
-        <h2 style={{ margin: 0, fontSize: 18, fontWeight: 900 }}>このGameのBAN / PICK</h2>
-        <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 10, background: "#7700ff" }}>
-            <div style={{ fontWeight: 900, marginBottom: 8 }}>Team A</div>
-            <div style={{ display: "grid", gap: 10 }}>
-              <Card title="BAN" items={bansA} />
-              <Card title="PICK" items={picksA} />
-            </div>
-          </div>
-
-          <div style={{ border: "1px solid #eee", borderRadius: 12, padding: 10, background: "#ff8800" }}>
-            <div style={{ fontWeight: 900, marginBottom: 8 }}>Team B</div>
-            <div style={{ display: "grid", gap: 10 }}>
-              <Card title="BAN" items={bansB} />
-              <Card title="PICK" items={picksB} />
-            </div>
-          </div>
-        </div>
-      </section>
-    );
-  };
+  }
 
   return (
     <main style={{ padding: 24, fontFamily: "system-ui", background: "#f3f4f6", minHeight: "100vh" }}>
-      {/* 観戦ヘッダ */}
-      <header style={{ ...PANEL, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+      <header style={{ ...SPECTATOR_PANEL, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <div>
           <h1 style={{ margin: 0, fontSize: 20, fontWeight: 900 }}>観戦モード（読み取り専用）</h1>
           <div style={{ marginTop: 6, fontSize: 12, color: TEXT.secondary }}>
             Bo={config.format} / Fearless={config.fearlessScope === "series" ? "Global(シリーズ)" : "GameOnly(ゲーム内)"} / NG表示={config.ngIncludesBans ? "BAN+PICK" : "PICKのみ"}
           </div>
+          <div style={{ marginTop: 6, fontSize: 13, color: UNITE.text }}>{teamAName} vs {teamBName}</div>
         </div>
 
-        {/* Game切替 */}
-<div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-  <button
-    type="button"
-    onClick={() => setViewGameNo((n) => Math.max(1, n - 1))}
-    disabled={viewGameNo <= 1}
-    style={{
-      border: "1px solid #888",
-      padding: "6px 10px",
-      borderRadius: 10,
-      fontWeight: 900,
-      background: viewGameNo <= 1 ? "#e5e7eb" : "white",
-      color: viewGameNo <= 1 ? TEXT.secondary : TEXT.primary,
-      cursor: viewGameNo <= 1 ? "not-allowed" : "pointer",
-      opacity: 1,
-    }}
-  >
-    ← Prev
-  </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={() => setManualViewGameNo(Math.max(1, viewGameNo - 1))}
+            disabled={viewGameNo <= 1}
+            style={{
+              border: "1px solid #888",
+              padding: "6px 10px",
+              borderRadius: 10,
+              fontWeight: 900,
+              background: viewGameNo <= 1 ? "#e5e7eb" : "white",
+              color: viewGameNo <= 1 ? TEXT.secondary : TEXT.primary,
+              cursor: viewGameNo <= 1 ? "not-allowed" : "pointer",
+              opacity: 1,
+            }}
+          >
+            ← Prev
+          </button>
 
-  <div style={{ fontWeight: 900 }}>
-    Game {viewGameNo}
-    {/* 👇 ライブでないときだけ表示 */}
-    {viewGameNo !== currentGameNo && (
-      <span style={{ marginLeft: 6, fontSize: 11, color: "#dc2626" }}>
-        （過去表示中）
-      </span>
-    )}
-  </div>
+          <div style={{ fontWeight: 900 }}>
+            Game {viewGameNo}
+            {viewGameNo !== currentGameNo && (
+              <span style={{ marginLeft: 6, fontSize: 11, color: "#dc2626" }}>（過去表示中）</span>
+            )}
+          </div>
 
-  <button
-    type="button"
-    onClick={() => setViewGameNo((n) => Math.min(maxGameNo, n + 1))}
-    disabled={viewGameNo >= maxGameNo}
-    style={{
-      border: "1px solid #888",
-      padding: "6px 10px",
-      borderRadius: 10,
-      fontWeight: 900,
-      background: viewGameNo >= maxGameNo ? "#e5e7eb" : "white",
-      color: viewGameNo >= maxGameNo ? TEXT.secondary : TEXT.primary,
-      cursor: viewGameNo >= maxGameNo ? "not-allowed" : "pointer",
-      opacity: 1,
-    }}
-  >
-    Next →
-  </button>
+          <button
+            type="button"
+            onClick={() => setManualViewGameNo(Math.min(maxGameNo, viewGameNo + 1))}
+            disabled={viewGameNo >= maxGameNo}
+            style={{
+              border: "1px solid #888",
+              padding: "6px 10px",
+              borderRadius: 10,
+              fontWeight: 900,
+              background: viewGameNo >= maxGameNo ? "#e5e7eb" : "white",
+              color: viewGameNo >= maxGameNo ? TEXT.secondary : TEXT.primary,
+              cursor: viewGameNo >= maxGameNo ? "not-allowed" : "pointer",
+              opacity: 1,
+            }}
+          >
+            Next →
+          </button>
 
-  {/* ✅ ここが追加ボタン */}
-  {viewGameNo !== currentGameNo && (
-    <button
-      type="button"
-      onClick={() => setViewGameNo(currentGameNo)}
-      style={{
-        marginLeft: 8,
-        border: "1px solid #2563eb",
-        padding: "6px 10px",
-        borderRadius: 10,
-        fontWeight: 900,
-        background: "white",
-        color: "#2563eb",
-        cursor: "pointer",
-      }}
-      title="管理画面の進行中Gameに戻ります"
-    >
-      🔴 Liveへ戻る
-    </button>
-  )}
-</div>
-
+          {viewGameNo !== currentGameNo && (
+            <button
+              type="button"
+              onClick={() => setManualViewGameNo(null)}
+              style={{
+                marginLeft: 8,
+                border: "1px solid #2563eb",
+                padding: "6px 10px",
+                borderRadius: 10,
+                fontWeight: 900,
+                background: "white",
+                color: "#2563eb",
+                cursor: "pointer",
+              }}
+              title="管理画面の進行中Gameに戻ります"
+            >
+              Liveへ戻る
+            </button>
+          )}
+        </div>
       </header>
 
-            {/* 上段：使用可能 */}
       <div style={{ marginTop: 14 }}>
-        <RoleRow
+        <SpectatorRoleRow
           title="使用可能ポケモン"
           byRole={pickableByRole}
           note="（このGameで、ルール上“今”使用可能な一覧）"
         />
       </div>
 
-      {/* 中段：このGameのBAN/PICK */}
       <div style={{ marginTop: 14 }}>
-        <DraftSummary />
+        <SpectatorDraftSummary
+          game={currentGame}
+          teamAName={teamAName}
+          teamBName={teamBName}
+          pokemonByName={pokemonByName}
+        />
       </div>
 
-      {/* 下段：使用不可 */}
       <div style={{ marginTop: 14 }}>
-        <RoleRow
+        <SpectatorRoleRow
           title="使用不可ポケモン"
           byRole={unpickableByRole}
           note={config.fearlessScope === "series" ? "（過去 + このGame のNG）" : "（このGame内の重複NG）"}
