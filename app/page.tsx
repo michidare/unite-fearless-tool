@@ -316,33 +316,24 @@ function SpectatorDraftSummary(props: {
 export default function Home() {
     const STORAGE_KEY_V2 = "unite-fearless:v2";
   const STORAGE_KEY_V1 = "unite-fearless:v1";
-  const STORAGE_KEY_WRITE_TOKEN = "unite-fearless:write-token";
+  const STORAGE_KEY_SESSION_KEYS = "unite-fearless:session-keys";
 
-  const [writeToken, setWriteToken] = useState("");
+  const [sessionWriteKeys, setSessionWriteKeys] = useState<Record<string, string>>({});
 
-  function saveWriteToken(next: string) {
-    const v = next.trim();
-    setWriteToken(v);
-    try {
-      if (v) {
-        localStorage.setItem(STORAGE_KEY_WRITE_TOKEN, v);
-      } else {
-        localStorage.removeItem(STORAGE_KEY_WRITE_TOKEN);
+  function saveSessionWriteKey(id: string, writeKey: string) {
+    const nextId = id.trim();
+    const nextKey = writeKey.trim();
+    if (!nextId || !nextKey) return;
+
+    setSessionWriteKeys((prev) => {
+      const next = { ...prev, [nextId]: nextKey };
+      try {
+        localStorage.setItem(STORAGE_KEY_SESSION_KEYS, JSON.stringify(next));
+      } catch {
+        // 無視
       }
-    } catch {
-      // 無視
-    }
-  }
-
-  async function ensureWriteToken() {
-    const current = writeToken.trim();
-    if (current) return current;
-
-    const entered = window.prompt("観戦URL更新用のトークンを入力してください")?.trim() ?? "";
-    if (!entered) return "";
-
-    saveWriteToken(entered);
-    return entered;
+      return next;
+    });
   }
 
   // SSR/CSR一致のためデフォルト固定
@@ -360,6 +351,7 @@ export default function Home() {
 const [spectateId, setSpectateId] = useState<string>(""); // ✅ 観戦セッションID
 const [spectatorUrl, setSpectatorUrl] = useState<string>(""); // ✅ 観戦URL（表示/コピー用）
   const [spectateError, setSpectateError] = useState("");
+  const currentSessionWriteKey = spectateId ? sessionWriteKeys[spectateId] ?? "" : "";
 
   // 枠選択（P0の中核）
   const [selected, setSelected] = useState<SelectedSlot>(null);
@@ -783,9 +775,13 @@ useEffect(() => {
   queueMicrotask(() => setMounted(true));
 
   try {
-    const savedWriteToken = localStorage.getItem(STORAGE_KEY_WRITE_TOKEN) ?? "";
-    if (savedWriteToken.trim()) {
-      queueMicrotask(() => setWriteToken(savedWriteToken.trim()));
+    const savedSessionKeys = localStorage.getItem(STORAGE_KEY_SESSION_KEYS) ?? "";
+    if (savedSessionKeys) {
+      const parsed = JSON.parse(savedSessionKeys) as Record<string, unknown>;
+      const restored = Object.fromEntries(
+        Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[0] === "string" && typeof entry[1] === "string")
+      );
+      queueMicrotask(() => setSessionWriteKeys(restored));
     }
   } catch {
     // 無視
@@ -926,7 +922,7 @@ useEffect(() => {
   if (!mounted) return;
   if (isReadOnly) return;
   if (!spectateId) return;
-  if (!writeToken.trim()) return;
+  if (!currentSessionWriteKey) return;
 
   const payload = { config, games, currentGameNo, teamAName, teamBName, lockHistory };
 
@@ -936,7 +932,7 @@ useEffect(() => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-spectate-token": writeToken.trim(),
+          "x-spectate-key": currentSessionWriteKey,
         },
         body: JSON.stringify({ id: spectateId, payload }),
       });
@@ -946,7 +942,7 @@ useEffect(() => {
   }, 400);
 
   return () => window.clearTimeout(t);
-}, [mounted, isReadOnly, spectateId, writeToken, config, games, currentGameNo, teamAName, teamBName, lockHistory]);
+}, [mounted, isReadOnly, spectateId, currentSessionWriteKey, config, games, currentGameNo, teamAName, teamBName, lockHistory]);
 
 
 
@@ -1153,20 +1149,12 @@ style={{
 
 <button
     onClick={async () => {
-    const token = await ensureWriteToken();
-    if (!token) {
-      alert("トークンが未入力のため、観戦URLを発行できません。");
-      return;
-    }
-
     const payload = { config, games, currentGameNo, teamAName, teamBName, lockHistory };
 
-    // ✅ APIに保存して短縮IDを受け取る
     const res = await fetch("/api/spectate", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-spectate-token": token,
       },
       body: JSON.stringify({ payload }),
     });
@@ -1182,10 +1170,11 @@ style={{
       return;
     }
 
-    const data = (await res.json()) as { id?: string };
+    const data = (await res.json()) as { id?: string; writeKey?: string };
     const id = (data.id ?? "").trim();
+    const writeKey = (data.writeKey ?? "").trim();
 
-    if (!id) {
+    if (!id || !writeKey) {
       // フォールバック：旧方式（長いURL）
       const b64 = encodeUtf8Base64(payload);
       const url = `${window.location.origin}${window.location.pathname}?spectate=${encodeURIComponent(b64)}`;
@@ -1196,6 +1185,7 @@ style={{
       return;
     }
 
+    saveSessionWriteKey(id, writeKey);
     setSpectateId(id);
 
     // ✅ 短いURL
@@ -1223,7 +1213,7 @@ style={{
 </button>
 
 <div style={{ fontSize: 12, color: TEXT.secondary }}>
-  ※ 観戦URLは<strong>読み取り専用</strong>です。配信・共有用途にご利用ください。
+  ※ 観戦URLは<strong>読み取り専用</strong>です。管理画面はこのブラウザから自動更新されます。
 </div>
 
       </div>
