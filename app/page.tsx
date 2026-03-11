@@ -365,7 +365,6 @@ const [spectateId, setSpectateId] = useState<string>(""); // ✅ 観戦セッシ
 const [spectatorUrl, setSpectatorUrl] = useState<string>(""); // ✅ 観戦URL（表示/コピー用）
   const [spectateError, setSpectateError] = useState("");
   const currentSessionWriteKey = spectateId ? sessionWriteKeys[spectateId] ?? "" : "";
-  const globalBanLocked = config.globalBanEnabled && (anyLocked || currentGameNo > 1);
 
   // 枠選択（P0の中核）
   const [selected, setSelected] = useState<SelectedSlot>(null);
@@ -570,6 +569,7 @@ const groupedByRole = useMemo(() => {
 }, [filteredList]);
 
   const anyLocked = useMemo(() => games.some((g) => g.locked), [games]);
+  const globalBanLocked = config.globalBanEnabled && (anyLocked || currentGameNo > 1);
 
   const selectedGameLocked = useMemo(() => {
   if (!selected || selected.slot === "globalBan") return false;
@@ -2074,5 +2074,6 @@ function SpectatorScreen(props: {
     </main>
   );
 }
+
 
 
