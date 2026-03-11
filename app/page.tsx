@@ -102,9 +102,36 @@ const TEXT = {
   const ROLE_ORDER: Role[] = ["アタック型", "バランス型", "スピード型", "ディフェンス型", "サポート型"];
 
 export default function Home() {
-  const WRITE_TOKEN = process.env.NEXT_PUBLIC_SPECTATE_WRITE_TOKEN ?? "";
-  const STORAGE_KEY_V2 = "unite-fearless:v2";
+    const STORAGE_KEY_V2 = "unite-fearless:v2";
   const STORAGE_KEY_V1 = "unite-fearless:v1";
+  const STORAGE_KEY_WRITE_TOKEN = "unite-fearless:write-token";
+
+  const [writeToken, setWriteToken] = useState("");
+
+  function saveWriteToken(next: string) {
+    const v = next.trim();
+    setWriteToken(v);
+    try {
+      if (v) {
+        localStorage.setItem(STORAGE_KEY_WRITE_TOKEN, v);
+      } else {
+        localStorage.removeItem(STORAGE_KEY_WRITE_TOKEN);
+      }
+    } catch {
+      // 無視
+    }
+  }
+
+  async function ensureWriteToken() {
+    const current = writeToken.trim();
+    if (current) return current;
+
+    const entered = window.prompt("観戦URL更新用のトークンを入力してください")?.trim() ?? "";
+    if (!entered) return "";
+
+    saveWriteToken(entered);
+    return entered;
+  }
 
   // SSR/CSR一致のためデフォルト固定
   const [config, setConfig] = useState<SeriesConfig>({
@@ -571,6 +598,15 @@ function undoUnlockLast() {
 useEffect(() => {
   setMounted(true);
 
+  try {
+    const savedWriteToken = localStorage.getItem(STORAGE_KEY_WRITE_TOKEN) ?? "";
+    if (savedWriteToken.trim()) {
+      setWriteToken(savedWriteToken.trim());
+    }
+  } catch {
+    // 無視
+  }
+
   (async () => {
     try {
       const params = new URLSearchParams(window.location.search);
@@ -809,29 +845,27 @@ useEffect(() => {
   if (!mounted) return;
   if (isReadOnly) return;        // 観戦画面では送らない
   if (!spectateId) return;       // 観戦URL未発行なら送らない
+  if (!writeToken.trim()) return; // トークン未入力なら送らない
 
   const payload = { config, games, currentGameNo, teamAName, teamBName, lockHistory };
 
   const t = window.setTimeout(async () => {
     try {
       await fetch("/api/spectate", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    ...(WRITE_TOKEN ? { "x-spectate-token": WRITE_TOKEN } : {}),
-  },
-  body: JSON.stringify({ id: spectateId, payload }),
-});
-
-
-
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-spectate-token": writeToken.trim(),
+        },
+        body: JSON.stringify({ id: spectateId, payload }),
+      });
     } catch {
       // 通信失敗は無視（次回更新で再送される）
     }
-  }, 400); // 300〜800ms推奨
+  }, 400);
 
   return () => window.clearTimeout(t);
-}, [mounted, isReadOnly, spectateId, config, games, currentGameNo, teamAName, teamBName, lockHistory]);
+}, [mounted, isReadOnly, spectateId, writeToken, config, games, currentGameNo, teamAName, teamBName, lockHistory]);
 
 
 
@@ -1034,20 +1068,24 @@ style={{
 </button>
 
 <button
-  onClick={async () => {
+    onClick={async () => {
+    const token = await ensureWriteToken();
+    if (!token) {
+      alert("トークンが未入力のため、観戦URLを発行できません。");
+      return;
+    }
+
     const payload = { config, games, currentGameNo, teamAName, teamBName, lockHistory };
 
     // ✅ APIに保存して短縮IDを受け取る
     const res = await fetch("/api/spectate", {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    ...(WRITE_TOKEN ? { "x-spectate-token": WRITE_TOKEN } : {}),
-  },
-  body: JSON.stringify({ payload }),
-});
-
-
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-spectate-token": token,
+      },
+      body: JSON.stringify({ payload }),
+    });
 
     if (!res.ok) {
       // フォールバック：旧方式（長いURL）
@@ -1061,19 +1099,20 @@ style={{
     }
 
     const data = (await res.json()) as { id?: string };
-const id = (data.id ?? "").trim();
+    const id = (data.id ?? "").trim();
 
-if (!id) {
-  // フォールバック：旧方式（長いURL）
-  const b64 = encodeUtf8Base64(payload);
-  const url = `${window.location.origin}${window.location.pathname}?spectate=${encodeURIComponent(b64)}`;
-  setSpectatorUrl(url);
-  try { await navigator.clipboard.writeText(url); } catch {}
-  return;
-}
+    if (!id) {
+      // フォールバック：旧方式（長いURL）
+      const b64 = encodeUtf8Base64(payload);
+      const url = `${window.location.origin}${window.location.pathname}?spectate=${encodeURIComponent(b64)}`;
+      setSpectatorUrl(url);
+      try {
+        await navigator.clipboard.writeText(url);
+      } catch {}
+      return;
+    }
 
-setSpectateId(id);
- // ✅ 以後の自動同期で使う
+    setSpectateId(id);
 
     // ✅ 短いURL
     const url = `${window.location.origin}${window.location.pathname}?spectateId=${encodeURIComponent(id)}`;

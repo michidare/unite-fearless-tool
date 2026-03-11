@@ -12,13 +12,13 @@ const KEY_PREFIX = "spectate:";
 const MAX_PAYLOAD_BYTES = 120_000; // 目安 120KB
 const ID_RE = /^[a-z0-9]{16}$/; // 16 chars
 
-type StoreValue = { payload: any; updatedAt: number };
+type StoreValue = { payload: unknown; updatedAt: number };
 
 function isValidId(id: string) {
   return ID_RE.test(id);
 }
 
-function payloadSizeBytes(payload: any) {
+function payloadSizeBytes(payload: unknown) {
   return new TextEncoder().encode(JSON.stringify(payload)).length;
 }
 
@@ -42,8 +42,13 @@ export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const id = (searchParams.get("id") ?? "").trim();
 
-  if (!id) return NextResponse.json({ error: "id is required" }, { status: 400, headers: NO_STORE });
-  if (!isValidId(id)) return NextResponse.json({ error: "invalid id" }, { status: 400, headers: NO_STORE });
+  if (!id) {
+    return NextResponse.json({ error: "id is required" }, { status: 400, headers: NO_STORE });
+  }
+
+  if (!isValidId(id)) {
+    return NextResponse.json({ error: "invalid id" }, { status: 400, headers: NO_STORE });
+  }
 
   const v = await kv.get<StoreValue>(keyOf(id));
   if (!v) {
@@ -57,30 +62,54 @@ export async function GET(req: Request) {
 // body: { payload } -> 新規作成 { id, updatedAt }
 // body: { id, payload } -> 同一idを上書き更新 { id, updatedAt }
 export async function POST(req: Request) {
-  // ✅ ここに token チェックを入れる（POSTの最初）
-  const token = req.headers.get("x-spectate-token") ?? "";
-  if (!token || token !== (process.env.SPECTATE_WRITE_TOKEN ?? "")) {
+  const serverToken = (process.env.SPECTATE_WRITE_TOKEN ?? "").trim();
+
+  if (!serverToken) {
+    return NextResponse.json(
+      { error: "server token is not configured" },
+      { status: 500, headers: NO_STORE }
+    );
+  }
+
+  const token = (req.headers.get("x-spectate-token") ?? "").trim();
+  if (!token || token !== serverToken) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401, headers: NO_STORE });
   }
 
-  let body: any;
+  let body: unknown;
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: "invalid json" }, { status: 400, headers: NO_STORE });
   }
 
-  const payload = body?.payload;
-  if (!payload) return NextResponse.json({ error: "payload is required" }, { status: 400, headers: NO_STORE });
+  const safeBody =
+    typeof body === "object" && body !== null
+      ? (body as { id?: unknown; payload?: unknown })
+      : null;
+
+  const payload = safeBody?.payload;
+  if (payload == null) {
+    return NextResponse.json({ error: "payload is required" }, { status: 400, headers: NO_STORE });
+  }
 
   // サイズ制限（公開時の事故防止）
   const bytes = payloadSizeBytes(payload);
   if (bytes > MAX_PAYLOAD_BYTES) {
-    return NextResponse.json({ error: "payload too large", maxBytes: MAX_PAYLOAD_BYTES, bytes }, { status: 413, headers: NO_STORE });
+    return NextResponse.json(
+      { error: "payload too large", maxBytes: MAX_PAYLOAD_BYTES, bytes },
+      { status: 413, headers: NO_STORE }
+    );
   }
 
-  const id = typeof body?.id === "string" && body.id.trim() ? body.id.trim() : makeId();
-  if (!isValidId(id)) return NextResponse.json({ error: "invalid id" }, { status: 400, headers: NO_STORE });
+  const id =
+    typeof safeBody?.id === "string" && safeBody.id.trim()
+      ? safeBody.id.trim()
+      : makeId();
+
+  if (!isValidId(id)) {
+    return NextResponse.json({ error: "invalid id" }, { status: 400, headers: NO_STORE });
+  }
 
   const now = Date.now();
   const value: StoreValue = { payload, updatedAt: now };
