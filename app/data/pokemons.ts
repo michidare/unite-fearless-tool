@@ -115,6 +115,7 @@ export const POKEMON_LIST: Pokemon[] = [
   { name: "ミュウツー(Y)", role: "アタック型", isMega: true }, // ✅指定：メガ進化扱い
   { name: "ミライドン", role: "アタック型" },
   { name: "ラティオス", role: "アタック型" },
+  { name: "サンダー", role: "アタック型" },
 
   // --- ディフェンス型 ---
   { name: "イワパレス", role: "ディフェンス型" },
@@ -143,8 +144,6 @@ export const POKEMON_LIST: Pokemon[] = [
   { name: "マスカーニャ", role: "スピード型" },
   { name: "リーフィア", role: "スピード型" },
 
-  // ✅ご指定：ストライクはスピード型（ハッサムと別扱い）
-  { name: "ストライク", role: "スピード型" },
 
   // --- バランス型 ---
   { name: "アマージョ", role: "バランス型" },
@@ -175,6 +174,8 @@ export const POKEMON_LIST: Pokemon[] = [
   { name: "メガリザードンX", role: "バランス型", isMega: true }, // ✅
   { name: "メガリザードンY", role: "バランス型", isMega: true }, // ✅
   { name: "ルカリオ", role: "バランス型" },
+  { name: "ネギガナイト", role: "バランス型" },
+  { name: "ファイヤー", role: "バランス型" },
   { name: "メガルカリオ", role: "バランス型", isMega: true }, // ✅
 
   // --- サポート型 ---
